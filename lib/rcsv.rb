@@ -4,7 +4,63 @@ require "rcsv/version"
 require "stringio"
 require "English"
 
+require_relative "rcsv/table"
+require_relative "rcsv/row"
+
 class Rcsv
+  # The error thrown when the parser encounters illegal CSV formatting.
+  class MalformedCSVError < RuntimeError
+    attr_reader :line_number
+    alias_method :lineno, :line_number
+    def initialize(message, line_number)
+      @line_number = line_number
+      super("#{message} in line #{line_number}.")
+    end
+  end
+
+  #
+  # This method is a shortcut for converting a single line of a CSV String into
+  # an Array.  Note that if +line+ contains multiple rows, anything beyond the
+  # first row is ignored.
+  #
+  # The +options+ parameter can be anything CSV::new() understands.
+  #
+  def self.parse_line(line, **options)
+    # new(line, options).shift
+    # self.parse(line, **options)
+    self.parse(line, **options)&.flatten
+  end
+
+  #
+  # This method is a shortcut for converting a single row (Array) into a CSV
+  # String.
+  #
+  # The +options+ parameter can be anything CSV::new() understands.  This method
+  # understands an additional <tt>:encoding</tt> parameter to set the base
+  # Encoding for the output.  This method will try to guess your Encoding from
+  # the first non-+nil+ field in +row+, if possible, but you may need to use
+  # this parameter as a backup plan.
+  #
+  # The <tt>:row_sep</tt> +option+ defaults to <tt>$INPUT_RECORD_SEPARATOR</tt>
+  # (<tt>$/</tt>) when calling this method.
+  #
+  def self.generate_line(row, **options)
+    options = {row_sep: $INPUT_RECORD_SEPARATOR}.merge(options)
+    str = String.new
+    if options[:encoding]
+      str.force_encoding(options[:encoding])
+    elsif field = row.find { |f| not f.nil? }
+      str.force_encoding(String(field).encoding)
+    end
+    # (new(str, options) << row).string
+    new(options).generate_row(row)
+  end
+
+
+
+
+
+
 
   attr_reader :write_options
 
@@ -27,19 +83,26 @@ class Rcsv
       #}
     #}
 
-    options[:header] ||= :use
+    # TODO:
+    return nil if csv_data.nil? || csv_data.empty?
+    # options[:header] ||= :use
+    options[:header] ||= :none
     raw_options = {}
 
-    raw_options[:col_sep] = options[:column_separator] && options[:column_separator][0] || ','
+    # raw_options[:col_sep] = options[:column_separator] && options[:column_separator][0] || ','
+    raw_options[:col_sep] = options[:col_sep] && options[:col_sep][0] || ','
     raw_options[:quote_char] = options[:quote_char] && options[:quote_char][0] || '"'
     raw_options[:offset_rows] = 0
     raw_options[:nostrict] = options[:nostrict]
     raw_options[:parse_empty_fields_as] = options[:parse_empty_fields_as]
     raw_options[:buffer_size] = options[:buffer_size] || 1024 * 1024 # 1 MiB
 
+# puts "# ========================================================================="
     if csv_data.is_a?(String)
       csv_data = StringIO.new(csv_data)
+# puts "csv_data_is_a?(String)"
     elsif !(csv_data.respond_to?(:each_line) && csv_data.respond_to?(:read))
+# puts "csv_data.respond_to?(:each_line) && csv_data.respond_to?(:read)"
       inspected_csv_data = csv_data.inspect
       raise ParseError.new("Supplied CSV object #{inspected_csv_data[0..127]}#{inspected_csv_data.size > 128 ? '...' : ''} is neither String nor looks like IO object.")
     end
@@ -50,19 +113,32 @@ class Rcsv
 
     initial_position = csv_data.pos
 
+# puts "options[:header]: #{options[:header]}"
     case options[:header]
     when :use
-      header = self.raw_parse(StringIO.new(csv_data.each_line.first), raw_options).first
+# puts "csv_data: #{csv_data.each_line.first}"
+# puts "StringIO: #{StringIO.new(csv_data.each_line.first.to_s)}"
+# puts "raw_options: #{raw_options}"
+      # TODO:
+      header = if csv_data.each_line.first.nil?
+                 nil
+               else
+                 # header = self.raw_parse(StringIO.new(csv_data.each_line.first), raw_options).first
+                 self.raw_parse(StringIO.new(csv_data.each_line.first), raw_options).first
+               end
       raw_options[:offset_rows] = corrected_offset_rows(options[:offset_rows])
     when :skip
       header = (0..(csv_data.each_line.first.split(raw_options[:col_sep]).count)).to_a
       raw_options[:offset_rows] = corrected_offset_rows(options[:offset_rows])
     when :none
+# puts "split: #{csv_data.each_line.first.split(raw_options[:col_sep])}"
       header = (0..(csv_data.each_line.first.split(raw_options[:col_sep]).count)).to_a
     end
+# puts "header: #{header}"
 
     raw_options[:row_as_hash] = options[:row_as_hash] # Setting after header parsing
 
+# puts "options[:columns]: #{options[:columns]}"
     if options[:columns]
       only_rows = []
       except_rows = []
@@ -133,21 +209,29 @@ class Rcsv
       raw_options[:row_conversions] = row_conversions
     end
 
+# puts "initial_position: #{initial_position}"
+# puts "raw_options: #{raw_options}"
+# puts "raw_parse: #{self.raw_parse(csv_data, raw_options, &block)}"
+# puts "csv_data: #{csv_data}"
     csv_data.pos = initial_position
     return self.raw_parse(csv_data, raw_options, &block)
   end
 
   def initialize(write_options = {})
     @write_options = write_options
-    @write_options[:column_separator] ||= ','
-    @write_options[:newline_delimiter] ||= $INPUT_RECORD_SEPARATOR
+    # @write_options[:column_separator] ||= ','
+    @write_options[:col_sep] ||= ','
+    # @write_options[:newline_delimiter] ||= $INPUT_RECORD_SEPARATOR
+    @write_options[:row_sep] ||= $INPUT_RECORD_SEPARATOR
     @write_options[:header] ||= false
 
     @quote = '"'
     @escaped_quote = @quote * 2
     @quotable_chars = Regexp.new('[%s%s%s]' % [
-      Regexp.escape(@write_options[:column_separator]),
-      Regexp.escape(@write_options[:newline_delimiter]),
+      # Regexp.escape(@write_options[:column_separator]),
+      Regexp.escape(@write_options[:col_sep]),
+      # Regexp.escape(@write_options[:newline_delimiter]),
+      Regexp.escape(@write_options[:row_sep]),
       Regexp.escape(@quote)
     ])
   end
@@ -162,11 +246,13 @@ class Rcsv
   def generate_header
     return @write_options[:columns].map { |c|
       c[:name].to_s
-    }.join(@write_options[:column_separator]) << @write_options[:newline_delimiter]
+    # }.join(@write_options[:column_separator]) << @write_options[:newline_delimiter]
+    }.join(@write_options[:col_sep]) << @write_options[:row_sep]
   end
 
   def generate_row(row)
-    column_separator = @write_options[:column_separator]
+    # column_separator = @write_options[:column_separator]
+    column_separator = @write_options[:col_sep]
     csv_row = ''
     max_index = row.size - 1
 
@@ -176,7 +262,8 @@ class Rcsv
       csv_row << column_separator unless index == max_index
     end
 
-    return csv_row << @write_options[:newline_delimiter]
+    # return csv_row << @write_options[:newline_delimiter]
+    return csv_row << @write_options[:row_sep]
   end
 
   protected
@@ -206,3 +293,6 @@ class Rcsv
     offset_rows
   end
 end
+
+require_relative "rcsv/core_ext/array"
+require_relative "rcsv/core_ext/string"

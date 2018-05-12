@@ -19,4 +19,5 @@ Gem::Specification.new do |gem|
   if RUBY_VERSION >= '2.2'
     gem.add_development_dependency "test-unit", "~> 3.0.8"
   end
+  gem.add_development_dependency "benchmark-ips"
 end
